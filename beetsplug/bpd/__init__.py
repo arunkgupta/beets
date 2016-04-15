@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # This file is part of beets.
-# Copyright 2013, Adrian Sampson.
+# Copyright 2016, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -16,18 +17,19 @@
 Beets library. Attempts to implement a compatible protocol to allow
 use of the wide range of MPD clients.
 """
-from __future__ import print_function
+
+from __future__ import division, absolute_import, print_function
 
 import re
 from string import Template
 import traceback
-import logging
 import random
 import time
 
 import beets
 from beets.plugins import BeetsPlugin
 import beets.ui
+from beets import logging
 from beets import vfs
 from beets.util import bluelet
 from beets.library import Item
@@ -121,9 +123,9 @@ def make_bpd_error(s_code, s_message):
             pass
     return NewBPDError
 
-ArgumentTypeError = make_bpd_error(ERROR_ARG, 'invalid type for argument')
-ArgumentIndexError = make_bpd_error(ERROR_ARG, 'argument out of range')
-ArgumentNotFoundError = make_bpd_error(ERROR_NO_EXIST, 'argument not found')
+ArgumentTypeError = make_bpd_error(ERROR_ARG, u'invalid type for argument')
+ArgumentIndexError = make_bpd_error(ERROR_ARG, u'argument out of range')
+ArgumentNotFoundError = make_bpd_error(ERROR_NO_EXIST, u'argument not found')
 
 
 def cast_arg(t, val):
@@ -266,7 +268,7 @@ class BaseServer(object):
             conn.authenticated = True
         else:
             conn.authenticated = False
-            raise BPDError(ERROR_PASSWORD, 'incorrect password')
+            raise BPDError(ERROR_PASSWORD, u'incorrect password')
 
     def cmd_commands(self, conn):
         """Lists the commands available to the user."""
@@ -570,7 +572,7 @@ class Connection(object):
         if isinstance(lines, basestring):
             lines = [lines]
         out = NEWLINE.join(lines) + NEWLINE
-        log.debug(out[:-1])  # Don't log trailing newline.
+        log.debug('{}', out[:-1])  # Don't log trailing newline.
         if isinstance(out, unicode):
             out = out.encode('utf8')
         return self.sock.sendall(out)
@@ -601,7 +603,7 @@ class Connection(object):
             line = line.strip()
             if not line:
                 break
-            log.debug(line)
+            log.debug('{}', line)
 
             if clist is not None:
                 # Command list already opened.
@@ -637,8 +639,8 @@ class Command(object):
     """A command issued by the client for processing by the server.
     """
 
-    command_re = re.compile(r'^([^ \t]+)[ \t]*')
-    arg_re = re.compile(r'"((?:\\"|[^"])+)"|([^ \t"]+)')
+    command_re = re.compile(br'^([^ \t]+)[ \t]*')
+    arg_re = re.compile(br'"((?:\\"|[^"])+)"|([^ \t"]+)')
 
     def __init__(self, s):
         """Creates a new `Command` from the given string, `s`, parsing
@@ -653,7 +655,7 @@ class Command(object):
             if match[0]:
                 # Quoted argument.
                 arg = match[0]
-                arg = arg.replace('\\"', '"').replace('\\\\', '\\')
+                arg = arg.replace(b'\\"', b'"').replace(b'\\\\', b'\\')
             else:
                 # Unquoted argument.
                 arg = match[1]
@@ -696,7 +698,7 @@ class Command(object):
 
         except Exception as e:
             # An "unintentional" error. Hide it from the client.
-            log.error(traceback.format_exc(e))
+            log.error('{}', traceback.format_exc(e))
             raise BPDError(ERROR_SYSTEM, u'server error', self.name)
 
 
@@ -804,9 +806,9 @@ class Server(BaseServer):
         """
         # Path is ignored. Also, the real MPD does this asynchronously;
         # this is done inline.
-        print('Building directory tree...')
+        print(u'Building directory tree...')
         self.tree = vfs.libtree(self.lib)
-        print('... done.')
+        print(u'... done.')
         self.updated_time = time.time()
 
     # Path (directory tree) browsing.
@@ -845,7 +847,7 @@ class Server(BaseServer):
         node = self._resolve_path(path)
         if isinstance(node, int):
             # Trying to list a track.
-            raise BPDError(ERROR_ARG, 'this is not a directory')
+            raise BPDError(ERROR_ARG, u'this is not a directory')
         else:
             for name, itemid in iter(sorted(node.files.items())):
                 item = self.lib.get_item(itemid)
@@ -1149,38 +1151,43 @@ class BPDPlugin(BeetsPlugin):
             'host': u'',
             'port': 6600,
             'password': u'',
+            'volume': VOLUME_MAX,
         })
+        self.config['password'].redact = True
 
-    def start_bpd(self, lib, host, port, password, debug):
+    def start_bpd(self, lib, host, port, password, volume, debug):
         """Starts a BPD server."""
-        if debug:
-            log.setLevel(logging.DEBUG)
+        if debug:  # FIXME this should be managed by BeetsPlugin
+            self._log.setLevel(logging.DEBUG)
         else:
-            log.setLevel(logging.WARNING)
+            self._log.setLevel(logging.WARNING)
         try:
-            Server(lib, host, port, password).run()
+            server = Server(lib, host, port, password)
+            server.cmd_setvol(None, volume)
+            server.run()
         except NoGstreamerError:
-            global_log.error('Gstreamer Python bindings not found.')
-            global_log.error('Install "python-gst0.10", "py27-gst-python", '
-                             'or similar package to use BPD.')
+            global_log.error(u'Gstreamer Python bindings not found.')
+            global_log.error(u'Install "python-gst0.10", "py27-gst-python", '
+                             u'or similar package to use BPD.')
 
     def commands(self):
         cmd = beets.ui.Subcommand(
-            'bpd', help='run an MPD-compatible music player server'
+            'bpd', help=u'run an MPD-compatible music player server'
         )
         cmd.parser.add_option(
             '-d', '--debug', action='store_true',
-            help='dump all MPD traffic to stdout'
+            help=u'dump all MPD traffic to stdout'
         )
 
         def func(lib, opts, args):
             host = args.pop(0) if args else self.config['host'].get(unicode)
             port = args.pop(0) if args else self.config['port'].get(int)
             if args:
-                raise beets.ui.UserError('too many arguments')
+                raise beets.ui.UserError(u'too many arguments')
             password = self.config['password'].get(unicode)
+            volume = self.config['volume'].get(int)
             debug = opts.debug or False
-            self.start_bpd(lib, host, int(port), password, debug)
+            self.start_bpd(lib, host, int(port), password, volume, debug)
 
         cmd.func = func
         return [cmd]

@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # This file is part of beets.
-# Copyright 2013, Adrian Sampson.
+# Copyright 2016, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -15,15 +16,14 @@
 """Uses user-specified rewriting rules to canonicalize names for path
 formats.
 """
+from __future__ import division, absolute_import, print_function
+
 import re
-import logging
 from collections import defaultdict
 
 from beets.plugins import BeetsPlugin
 from beets import ui
 from beets import library
-
-log = logging.getLogger('beets')
 
 
 def rewriter(field, rules):
@@ -55,11 +55,11 @@ class RewritePlugin(BeetsPlugin):
             try:
                 fieldname, pattern = key.split(None, 1)
             except ValueError:
-                raise ui.UserError("invalid rewrite specification")
+                raise ui.UserError(u"invalid rewrite specification")
             if fieldname not in library.Item._fields:
-                raise ui.UserError("invalid field name (%s) in rewriter" %
+                raise ui.UserError(u"invalid field name (%s) in rewriter" %
                                    fieldname)
-            log.debug(u'adding template field %s' % key)
+            self._log.debug(u'adding template field {0}', key)
             pattern = re.compile(pattern.lower())
             rules[fieldname].append((pattern, value))
             if fieldname == 'artist':
@@ -69,4 +69,7 @@ class RewritePlugin(BeetsPlugin):
 
         # Replace each template field with the new rewriter function.
         for fieldname, fieldrules in rules.iteritems():
-            self.template_fields[fieldname] = rewriter(fieldname, fieldrules)
+            getter = rewriter(fieldname, fieldrules)
+            self.template_fields[fieldname] = getter
+            if fieldname in library.Album._fields:
+                self.album_template_fields[fieldname] = getter

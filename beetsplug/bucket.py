@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # This file is part of beets.
-# Copyright 2014, Fabrice Laporte.
+# Copyright 2016, Fabrice Laporte.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -15,14 +16,14 @@
 """Provides the %bucket{} function for path formatting.
 """
 
+from __future__ import division, absolute_import, print_function
+
 from datetime import datetime
-import logging
 import re
 import string
 from itertools import tee, izip
-from beets import plugins, ui
 
-log = logging.getLogger('beets')
+from beets import plugins, ui
 
 
 class BucketError(Exception):
@@ -44,7 +45,7 @@ def span_from_str(span_str):
         """Convert string to a 4 digits year
         """
         if yearfrom < 100:
-            raise BucketError("%d must be expressed on 4 digits" % yearfrom)
+            raise BucketError(u"%d must be expressed on 4 digits" % yearfrom)
 
         # if two digits only, pick closest year that ends by these two
         # digits starting from yearfrom
@@ -57,12 +58,12 @@ def span_from_str(span_str):
 
     years = [int(x) for x in re.findall('\d+', span_str)]
     if not years:
-        raise ui.UserError("invalid range defined for year bucket '%s': no "
-                           "year found" % span_str)
+        raise ui.UserError(u"invalid range defined for year bucket '%s': no "
+                           u"year found" % span_str)
     try:
         years = [normalize_year(x, years[0]) for x in years]
     except BucketError as exc:
-        raise ui.UserError("invalid range defined for year bucket '%s': %s" %
+        raise ui.UserError(u"invalid range defined for year bucket '%s': %s" %
                            (span_str, exc))
 
     res = {'from': years[0], 'str': span_str}
@@ -117,12 +118,9 @@ def build_year_spans(year_spans_str):
 def str2fmt(s):
     """Deduces formatting syntax from a span string.
     """
-    regex = re.compile("(?P<bef>\D*)(?P<fromyear>\d+)(?P<sep>\D*)"
-                       "(?P<toyear>\d*)(?P<after>\D*)")
+    regex = re.compile(r"(?P<bef>\D*)(?P<fromyear>\d+)(?P<sep>\D*)"
+                       r"(?P<toyear>\d*)(?P<after>\D*)")
     m = re.match(regex, s)
-
-    def year_format(year):
-        return '%%0%dd' % len(year)
 
     res = {'fromnchars': len(m.group('fromyear')),
            'tonchars': len(m.group('toyear'))}
@@ -136,9 +134,9 @@ def str2fmt(s):
 def format_span(fmt, yearfrom, yearto, fromnchars, tonchars):
     """Return a span string representation.
     """
-    args = (str(yearfrom)[-fromnchars:])
+    args = (bytes(yearfrom)[-fromnchars:])
     if tonchars:
-        args = (str(yearfrom)[-fromnchars:], str(yearto)[-tonchars:])
+        args = (bytes(yearfrom)[-fromnchars:], bytes(yearto)[-tonchars:])
     return fmt % args
 
 
@@ -167,8 +165,8 @@ def build_alpha_spans(alpha_spans_str, alpha_regexs):
                 beginIdx = ASCII_DIGITS.index(bucket[0])
                 endIdx = ASCII_DIGITS.index(bucket[-1])
             else:
-                raise ui.UserError("invalid range defined for alpha bucket "
-                                   "'%s': no alphanumeric character found" %
+                raise ui.UserError(u"invalid range defined for alpha bucket "
+                                   u"'%s': no alphanumeric character found" %
                                    elem)
             spans.append(
                 re.compile(

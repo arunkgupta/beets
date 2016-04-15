@@ -4,18 +4,17 @@ Getting Started
 Welcome to `beets`_! This guide will help you begin using it to make your music
 collection better.
 
-.. _beets: http://beets.radbox.org/
+.. _beets: http://beets.io/
 
 Installing
 ----------
 
-You will need Python. (Beets is written for `Python 2.7`_, but it works with
-2.6 as well. Python 3.x is not yet supported.)
+You will need Python. (Beets is written for `Python 2.7`_. 2.6 support has been
+dropped, and Python 3.x is not yet supported.)
 
-.. _Python 2.7: http://www.python.org/download/releases/2.7.2/
+.. _Python 2.7: http://www.python.org/download/
 
-* **Mac OS X** v10.7 (Lion) and 10.8 (Mountain Lion) include Python 2.7 out of
-  the box; Snow Leopard ships with Python 2.6.
+* **Mac OS X** v10.7 (Lion) and later include Python 2.7 out of the box.
 
 * On **Debian or Ubuntu**, depending on the version, beets is available as an
   official package (`Debian details`_, `Ubuntu details`_), so try typing:
@@ -35,15 +34,20 @@ You will need Python. (Beets is written for `Python 2.7`_, but it works with
 
 * On **FreeBSD**, there's a `beets port`_ at ``audio/beets``.
 
-* On **OpenBSD-current**, beets is available in ports (at ``audio/beets``) and
-  as a package, which can be installed with ``pkg_add beets``.
+* On **OpenBSD**, beets can be installed with ``pkg_add beets``.
 
 * For **Slackware**, there's a `SlackBuild`_ available.
 
+* On **Fedora** 22 or later, there is a `DNF package`_ (or three)::
+
+      $ sudo dnf install beets beets-plugins beets-doc
+
+.. _copr: https://copr.fedoraproject.org/coprs/afreof/beets/
+.. _dnf package: https://apps.fedoraproject.org/packages/beets
 .. _SlackBuild: http://slackbuilds.org/repository/14.1/multimedia/beets/
 .. _beets port: http://portsmon.freebsd.org/portoverview.py?category=audio&portname=beets
-.. _beets from AUR: http://aur.archlinux.org/packages.php?ID=39577
-.. _dev package: http://aur.archlinux.org/packages.php?ID=48617
+.. _beets from AUR: https://aur.archlinux.org/packages/beets-git/
+.. _dev package: https://aur.archlinux.org/packages/beets-git/
 .. _Debian details: http://packages.qa.debian.org/b/beets.html
 .. _Ubuntu details: https://launchpad.net/ubuntu/+source/beets
 .. _beets is in [community]: https://www.archlinux.org/packages/community/any/beets/
@@ -97,7 +101,7 @@ trouble or you have more detail to contribute here, please direct it to
 `the mailing list`_.
 
 .. _install Python: http://python.org/download/
-.. _beets.reg: https://github.com/sampsyo/beets/blob/master/extra/beets.reg
+.. _beets.reg: https://github.com/beetbox/beets/blob/master/extra/beets.reg
 .. _install pip: http://www.pip-installer.org/en/latest/installing.html#install-pip
 .. _get-pip.py: https://raw.github.com/pypa/pip/master/contrib/get-pip.py
 
@@ -117,7 +121,9 @@ place to start::
 
 Change that first path to a directory where you'd like to keep your music. Then,
 for ``library``, choose a good place to keep a database file that keeps an index
-of your music.
+of your music. (The config's format is `YAML`_. You'll want to configure your
+text editor to use spaces, not real tabs, for indentation.)
+
 
 The default configuration assumes you want to start a new organized music folder
 (that ``directory`` above) and that you'll *copy* cleaned-up music into that
@@ -150,6 +156,8 @@ beets to behave many other ways:
 There are approximately six million other configuration options you can set
 here, including the directory and file naming scheme. See
 :doc:`/reference/config` for a full reference.
+
+.. _YAML: http://yaml.org/
 
 Importing Your Library
 ----------------------

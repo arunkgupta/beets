@@ -1,7 +1,11 @@
+# -*- coding: utf-8 -*-
+
 """Tests for the 'zero' plugin"""
 
-from _common import unittest
-from helper import TestHelper
+from __future__ import division, absolute_import, print_function
+
+from test._common import unittest
+from test.helper import TestHelper
 
 from beets.library import Item
 from beets import config
@@ -10,43 +14,46 @@ from beets.mediafile import MediaFile
 
 
 class ZeroPluginTest(unittest.TestCase, TestHelper):
+    def setUp(self):
+        self.setup_beets()
 
     def tearDown(self):
-        config.clear()
+        self.teardown_beets()
         self.unload_plugins()
 
     def test_no_patterns(self):
-        i = Item(
-            comments='test comment',
-            day=13,
-            month=3,
-            year=2012,
-        )
+        tags = {
+            'comments': u'test comment',
+            'day': 13,
+            'month': 3,
+            'year': 2012,
+        }
         z = ZeroPlugin()
         z.debug = False
         z.fields = ['comments', 'month', 'day']
-        z.patterns = {'comments': ['.'],
-                      'month': ['.'],
-                      'day': ['.']}
-        z.write_event(i)
-        self.assertEqual(i.comments, '')
-        self.assertEqual(i.day, 0)
-        self.assertEqual(i.month, 0)
-        self.assertEqual(i.year, 2012)
+        z.patterns = {'comments': [u'.'],
+                      'month': [u'.'],
+                      'day': [u'.']}
+        z.write_event(None, None, tags)
+        self.assertEqual(tags['comments'], None)
+        self.assertEqual(tags['day'], None)
+        self.assertEqual(tags['month'], None)
+        self.assertEqual(tags['year'], 2012)
 
     def test_patterns(self):
-        i = Item(
-            comments='from lame collection, ripped by eac',
-            year=2012,
-        )
         z = ZeroPlugin()
         z.debug = False
         z.fields = ['comments', 'year']
-        z.patterns = {'comments': 'eac lame'.split(),
-                      'year': '2098 2099'.split()}
-        z.write_event(i)
-        self.assertEqual(i.comments, '')
-        self.assertEqual(i.year, 2012)
+        z.patterns = {'comments': u'eac lame'.split(),
+                      'year': u'2098 2099'.split()}
+
+        tags = {
+            'comments': u'from lame collection, ripped by eac',
+            'year': 2012,
+        }
+        z.write_event(None, None, tags)
+        self.assertEqual(tags['comments'], None)
+        self.assertEqual(tags['year'], 2012)
 
     def test_delete_replaygain_tag(self):
         path = self.create_mediafile_fixture()
@@ -68,9 +75,54 @@ class ZeroPluginTest(unittest.TestCase, TestHelper):
         self.assertIsNone(mediafile.rg_track_peak)
         self.assertIsNone(mediafile.rg_track_gain)
 
+    def test_do_not_change_database(self):
+        item = self.add_item_fixture(year=2000)
+        item.write()
+        mediafile = MediaFile(item.path)
+        self.assertEqual(2000, mediafile.year)
+
+        config['zero'] = {'fields': ['year']}
+        self.load_plugins('zero')
+
+        item.write()
+        mediafile = MediaFile(item.path)
+        self.assertEqual(item['year'], 2000)
+        self.assertIsNone(mediafile.year)
+
+    def test_change_database(self):
+        item = self.add_item_fixture(year=2000)
+        item.write()
+        mediafile = MediaFile(item.path)
+        self.assertEqual(2000, mediafile.year)
+
+        config['zero'] = {
+            'fields': [u'year'],
+            'update_database': True,
+        }
+        self.load_plugins('zero')
+
+        item.write()
+        mediafile = MediaFile(item.path)
+        self.assertEqual(item['year'], 0)
+        self.assertIsNone(mediafile.year)
+
+    def test_album_art(self):
+        path = self.create_mediafile_fixture(images=['jpg'])
+        item = Item.from_path(path)
+
+        mediafile = MediaFile(item.path)
+        self.assertNotEqual(0, len(mediafile.images))
+
+        config['zero'] = {'fields': [u'images']}
+        self.load_plugins('zero')
+
+        item.write()
+        mediafile = MediaFile(item.path)
+        self.assertEqual(0, len(mediafile.images))
+
 
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)
 
-if __name__ == '__main__':
+if __name__ == b'__main__':
     unittest.main(defaultTest='suite')

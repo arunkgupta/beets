@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # This file is part of beets.
-# Copyright 2013, Adrian Sampson.
+# Copyright 2016, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -14,7 +15,9 @@
 
 """Test the "pipeline.py" restricted parallel programming library.
 """
-from _common import unittest
+from __future__ import division, absolute_import, print_function
+
+from test._common import unittest
 from beets.util import pipeline
 
 
@@ -237,5 +240,5 @@ class StageDecoratorTest(unittest.TestCase):
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)
 
-if __name__ == '__main__':
+if __name__ == b'__main__':
     unittest.main(defaultTest='suite')

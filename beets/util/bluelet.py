@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 """Extremely simple pure-Python implementation of coroutine-style
 asynchronous socket I/O. Inspired by, but inferior to, Eventlet.
 Bluelet can also be thought of as a less-terrible replacement for
@@ -5,6 +7,8 @@ asyncore.
 
 Bluelet: easy concurrency without all the messy parallelism.
 """
+from __future__ import division, absolute_import, print_function
+
 import socket
 import select
 import sys
@@ -550,7 +554,7 @@ def spawn(coro):
     and child coroutines run concurrently.
     """
     if not isinstance(coro, types.GeneratorType):
-        raise ValueError('%s is not a coroutine' % str(coro))
+        raise ValueError(u'%s is not a coroutine' % coro)
     return SpawnEvent(coro)
 
 
@@ -560,7 +564,7 @@ def call(coro):
     returns a value using end(), then this event returns that value.
     """
     if not isinstance(coro, types.GeneratorType):
-        raise ValueError('%s is not a coroutine' % str(coro))
+        raise ValueError(u'%s is not a coroutine' % coro)
     return DelegationEvent(coro)
 
 

@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 # This file is part of beets.
-# Copyright 2013, Adrian Sampson.
+# Copyright 2016, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -14,15 +15,17 @@
 
 """The core data store and collection logic for beets.
 """
+from __future__ import division, absolute_import, print_function
+
 import os
 import sys
-import logging
-import shlex
 import unicodedata
 import time
 import re
 from unidecode import unidecode
-from beets.mediafile import MediaFile, MutagenError
+
+from beets import logging
+from beets.mediafile import MediaFile, MutagenError, UnreadableFileError
 from beets import plugins
 from beets import util
 from beets.util import bytestring_path, syspath, normpath, samefile
@@ -38,33 +41,80 @@ log = logging.getLogger('beets')
 # Library-specific query types.
 
 class PathQuery(dbcore.FieldQuery):
-    """A query that matches all items under a given path."""
-    def __init__(self, field, pattern, fast=True):
+    """A query that matches all items under a given path.
+
+    Matching can either be case-insensitive or case-sensitive. By
+    default, the behavior depends on the OS: case-insensitive on Windows
+    and case-sensitive otherwise.
+    """
+
+    escape_re = re.compile(r'[\\_%]')
+    escape_char = b'\\'
+
+    def __init__(self, field, pattern, fast=True, case_sensitive=None):
+        """Create a path query. `pattern` must be a path, either to a
+        file or a directory.
+
+        `case_sensitive` can be a bool or `None`, indicating that the
+        behavior should depend on the filesystem.
+        """
         super(PathQuery, self).__init__(field, pattern, fast)
+
+        # By default, the case sensitivity depends on the filesystem
+        # that the query path is located on.
+        if case_sensitive is None:
+            path = util.bytestring_path(util.normpath(pattern))
+            case_sensitive = beets.util.case_sensitive(path)
+        self.case_sensitive = case_sensitive
+
+        # Use a normalized-case pattern for case-insensitive matches.
+        if not case_sensitive:
+            pattern = pattern.lower()
 
         # Match the path as a single file.
         self.file_path = util.bytestring_path(util.normpath(pattern))
         # As a directory (prefix).
-        self.dir_path = util.bytestring_path(os.path.join(self.file_path, ''))
+        self.dir_path = util.bytestring_path(os.path.join(self.file_path, b''))
+
+    @classmethod
+    def is_path_query(cls, query_part):
+        """Try to guess whether a unicode query part is a path query.
+
+        Condition: separator precedes colon and the file exists.
+        """
+        colon = query_part.find(':')
+        if colon != -1:
+            query_part = query_part[:colon]
+        return (os.sep in query_part and
+                os.path.exists(syspath(normpath(query_part))))
 
     def match(self, item):
-        return (item.path == self.file_path) or \
-            item.path.startswith(self.dir_path)
+        path = item.path if self.case_sensitive else item.path.lower()
+        return (path == self.file_path) or path.startswith(self.dir_path)
 
-    def clause(self):
-        dir_pat = buffer(self.dir_path + '%')
-        file_blob = buffer(self.file_path)
-        return '({0} = ?) || ({0} LIKE ?)'.format(self.field), \
-               (file_blob, dir_pat)
+    def col_clause(self):
+        if self.case_sensitive:
+            file_blob = buffer(self.file_path)
+            dir_blob = buffer(self.dir_path)
+            return '({0} = ?) || (substr({0}, 1, ?) = ?)'.format(self.field), \
+                   (file_blob, len(dir_blob), dir_blob)
+
+        escape = lambda m: self.escape_char + m.group(0)
+        dir_pattern = self.escape_re.sub(escape, self.dir_path)
+        dir_blob = buffer(dir_pattern + b'%')
+        file_pattern = self.escape_re.sub(escape, self.file_path)
+        file_blob = buffer(file_pattern)
+        return '({0} LIKE ? ESCAPE ?) || ({0} LIKE ? ESCAPE ?)'.format(
+            self.field), (file_blob, self.escape_char, dir_blob,
+                          self.escape_char)
 
 
 # Library-specific field types.
 
-
-class DateType(types.Type):
-    sql = u'REAL'
+class DateType(types.Float):
+    # TODO representation should be `datetime` object
+    # TODO distinguish between date and time types
     query = dbcore.query.DateQuery
-    null = 0.0
 
     def format(self, value):
         return time.strftime(beets.config['time_format'].get(unicode),
@@ -87,6 +137,7 @@ class DateType(types.Type):
 class PathType(types.Type):
     sql = u'BLOB'
     query = PathQuery
+    model_type = bytes
 
     def format(self, value):
         return util.displayable_path(value)
@@ -107,6 +158,14 @@ class PathType(types.Type):
         else:
             return value
 
+    def from_sql(self, sql_value):
+        return self.normalize(sql_value)
+
+    def to_sql(self, value):
+        if isinstance(value, bytes):
+            value = buffer(value)
+        return value
+
 
 class MusicalKey(types.String):
     """String representing the musical key of a song.
@@ -126,6 +185,7 @@ class MusicalKey(types.String):
         for flat, sharp in self.ENHARMONIC.items():
             key = re.sub(flat, sharp, key)
         key = re.sub(r'[\W\s]+minor', 'm', key)
+        key = re.sub(r'[\W\s]+major', '', key)
         return key.capitalize()
 
     def normalize(self, key):
@@ -135,18 +195,62 @@ class MusicalKey(types.String):
             return self.parse(key)
 
 
+class DurationType(types.Float):
+    """Human-friendly (M:SS) representation of a time interval."""
+    query = dbcore.query.DurationQuery
+
+    def format(self, value):
+        if not beets.config['format_raw_length'].get(bool):
+            return beets.ui.human_seconds_short(value or 0.0)
+        else:
+            return value
+
+    def parse(self, string):
+        try:
+            # Try to format back hh:ss to seconds.
+            return util.raw_seconds_short(string)
+        except ValueError:
+            # Fall back to a plain float.
+            try:
+                return float(string)
+            except ValueError:
+                return self.null
+
+
+# Library-specific sort types.
+
+class SmartArtistSort(dbcore.query.Sort):
+    """Sort by artist (either album artist or track artist),
+    prioritizing the sort field over the raw field.
+    """
+    def __init__(self, model_cls, ascending=True, case_insensitive=True):
+        self.album = model_cls is Album
+        self.ascending = ascending
+        self.case_insensitive = case_insensitive
+
+    def order_clause(self):
+        order = "ASC" if self.ascending else "DESC"
+        field = 'albumartist' if self.album else 'artist'
+        collate = 'COLLATE NOCASE' if self.case_insensitive else ''
+        return ('(CASE {0}_sort WHEN NULL THEN {0} '
+                'WHEN "" THEN {0} '
+                'ELSE {0}_sort END) {1} {2}').format(field, collate, order)
+
+    def sort(self, objs):
+        if self.album:
+            field = lambda a: a.albumartist_sort or a.albumartist
+        else:
+            field = lambda i: i.artist_sort or i.artist
+
+        if self.case_insensitive:
+            key = lambda x: field(x).lower()
+        else:
+            key = field
+        return sorted(objs, key=key, reverse=not self.ascending)
+
+
 # Special path format key.
 PF_KEY_DEFAULT = 'default'
-
-
-# A little SQL utility.
-def _orelse(exp1, exp2):
-    """Generates an SQLite expression that evaluates to exp1 if exp1 is
-    non-null and non-empty or exp2 otherwise.
-    """
-    return ("""(CASE {0} WHEN NULL THEN {1}
-                         WHEN "" THEN {1}
-                         ELSE {0} END)""").format(exp1, exp2)
 
 
 # Exceptions.
@@ -196,7 +300,10 @@ class WriteError(FileOperationError):
 class LibModel(dbcore.Model):
     """Shared concrete functionality for Items and Albums.
     """
-    _bytes_keys = ('path', 'artpath')
+
+    _format_config_key = None
+    """Config key that specifies how an instance should be formatted.
+    """
 
     def _template_funcs(self):
         funcs = DefaultTemplateFunctions(self, self._db).functions()
@@ -205,15 +312,82 @@ class LibModel(dbcore.Model):
 
     def store(self):
         super(LibModel, self).store()
-        plugins.send('database_change', lib=self._db)
+        plugins.send('database_change', lib=self._db, model=self)
 
     def remove(self):
         super(LibModel, self).remove()
-        plugins.send('database_change', lib=self._db)
+        plugins.send('database_change', lib=self._db, model=self)
 
     def add(self, lib=None):
         super(LibModel, self).add(lib)
-        plugins.send('database_change', lib=self._db)
+        plugins.send('database_change', lib=self._db, model=self)
+
+    def __format__(self, spec):
+        if not spec:
+            spec = beets.config[self._format_config_key].get(unicode)
+        result = self.evaluate_template(spec)
+        if isinstance(spec, bytes):
+            # if spec is a byte string then we must return a one as well
+            return result.encode('utf8')
+        else:
+            return result
+
+    def __str__(self):
+        return format(self).encode('utf8')
+
+    def __unicode__(self):
+        return format(self)
+
+
+class FormattedItemMapping(dbcore.db.FormattedMapping):
+    """Add lookup for album-level fields.
+
+    Album-level fields take precedence if `for_path` is true.
+    """
+
+    def __init__(self, item, for_path=False):
+        super(FormattedItemMapping, self).__init__(item, for_path)
+        self.album = item.get_album()
+        self.album_keys = []
+        if self.album:
+            for key in self.album.keys(True):
+                if key in Album.item_keys or key not in item._fields.keys():
+                    self.album_keys.append(key)
+        self.all_keys = set(self.model_keys).union(self.album_keys)
+
+    def _get(self, key):
+        """Get the value for a key, either from the album or the item.
+        Raise a KeyError for invalid keys.
+        """
+        if self.for_path and key in self.album_keys:
+            return self._get_formatted(self.album, key)
+        elif key in self.model_keys:
+            return self._get_formatted(self.model, key)
+        elif key in self.album_keys:
+            return self._get_formatted(self.album, key)
+        else:
+            raise KeyError(key)
+
+    def __getitem__(self, key):
+        """Get the value for a key. Certain unset values are remapped.
+        """
+        value = self._get(key)
+
+        # `artist` and `albumartist` fields fall back to one another.
+        # This is helpful in path formats when the album artist is unset
+        # on as-is imports.
+        if key == 'artist' and not value:
+            return self._get('albumartist')
+        elif key == 'albumartist' and not value:
+            return self._get('artist')
+        else:
+            return value
+
+    def __iter__(self):
+        return iter(self.all_keys)
+
+    def __len__(self):
+        return len(self.all_keys)
 
 
 class Item(LibModel):
@@ -274,7 +448,7 @@ class Item(LibModel):
         'original_day':         types.PaddedInt(2),
         'initial_key':          MusicalKey(),
 
-        'length':      types.FLOAT,
+        'length':      DurationType(),
         'bitrate':     types.ScaledInt(1000, u'kbps'),
         'format':      types.STRING,
         'samplerate':  types.ScaledInt(1000, u'kHz'),
@@ -287,6 +461,10 @@ class Item(LibModel):
     _search_fields = ('artist', 'title', 'comments',
                       'album', 'albumartist', 'genre')
 
+    _types = {
+        'data_source': types.STRING,
+    }
+
     _media_fields = set(MediaFile.readable_fields()) \
         .intersection(_fields.keys())
     """Set of item fields that are backed by `MediaFile` fields.
@@ -296,10 +474,25 @@ class Item(LibModel):
     `write`.
     """
 
+    _media_tag_fields = set(MediaFile.fields()).intersection(_fields.keys())
+    """Set of item fields that are backed by *writable* `MediaFile` tag
+    fields.
+
+    This excludes fields that represent audio data, such as `bitrate` or
+    `length`.
+    """
+
+    _formatter = FormattedItemMapping
+
+    _sorts = {'artist': SmartArtistSort}
+
+    _format_config_key = 'format_item'
+
     @classmethod
     def _getters(cls):
         getters = plugins.item_field_getters()
         getters['singleton'] = lambda i: i.album_id is None
+        getters['filesize'] = Item.try_filesize  # In bytes.
         return getters
 
     @classmethod
@@ -320,7 +513,7 @@ class Item(LibModel):
             if isinstance(value, unicode):
                 value = bytestring_path(value)
             elif isinstance(value, buffer):
-                value = str(value)
+                value = bytes(value)
 
         if key in MediaFile.fields():
             self.mtime = 0  # Reset mtime on dirty.
@@ -349,7 +542,7 @@ class Item(LibModel):
     def read(self, read_path=None):
         """Read the metadata from the associated file.
 
-        If ``read_path`` is specified, read metadata from that file
+        If `read_path` is specified, read metadata from that file
         instead. Updates all the properties in `_media_fields`
         from the media file.
 
@@ -361,16 +554,13 @@ class Item(LibModel):
             read_path = normpath(read_path)
         try:
             mediafile = MediaFile(syspath(read_path))
-        except (OSError, IOError) as exc:
+        except (OSError, IOError, UnreadableFileError) as exc:
             raise ReadError(read_path, exc)
 
         for key in self._media_fields:
             value = getattr(mediafile, key)
             if isinstance(value, (int, long)):
-                # Filter values wider than 64 bits (in signed representation).
-                # SQLite cannot store them. py26: Post transition, we can use:
-                # value.bit_length() > 63
-                if abs(value) >= 2 ** 63:
+                if value.bit_length() > 63:
                     value = 0
             self[key] = value
 
@@ -380,11 +570,17 @@ class Item(LibModel):
 
         self.path = read_path
 
-    def write(self, path=None):
+    def write(self, path=None, tags=None):
         """Write the item's metadata to a media file.
 
         All fields in `_media_fields` are written to disk according to
         the values on this object.
+
+        `path` is the path of the mediafile to write the data to. It
+        defaults to the item's path.
+
+        `tags` is a dictionary of additional metadata the should be
+        written to the file. (These tags need not be in `_media_fields`.)
 
         Can raise either a `ReadError` or a `WriteError`.
         """
@@ -392,16 +588,26 @@ class Item(LibModel):
             path = self.path
         else:
             path = normpath(path)
+
+        # Get the data to write to the file.
+        item_tags = dict(self)
+        item_tags = {k: v for k, v in item_tags.items()
+                     if k in self._media_fields}  # Only write media fields.
+        if tags is not None:
+            item_tags.update(tags)
+        plugins.send('write', item=self, path=path, tags=item_tags)
+
+        # Open the file.
         try:
-            mediafile = MediaFile(syspath(path))
-        except (OSError, IOError) as exc:
+            mediafile = MediaFile(syspath(path),
+                                  id3v23=beets.config['id3v23'].get(bool))
+        except (OSError, IOError, UnreadableFileError) as exc:
             raise ReadError(self.path, exc)
 
-        plugins.send('write', item=self, path=path)
-
-        mediafile.update(self)
+        # Write the tags to the file.
+        mediafile.update(item_tags)
         try:
-            mediafile.save(id3v23=beets.config['id3v23'].get(bool))
+            mediafile.save()
         except (OSError, IOError, MutagenError) as exc:
             raise WriteError(self.path, exc)
 
@@ -410,22 +616,44 @@ class Item(LibModel):
             self.mtime = self.current_mtime()
         plugins.send('after_write', item=self, path=path)
 
-    def try_write(self, path=None):
+    def try_write(self, path=None, tags=None):
         """Calls `write()` but catches and logs `FileOperationError`
         exceptions.
 
         Returns `False` an exception was caught and `True` otherwise.
         """
         try:
-            self.write(path)
+            self.write(path, tags)
             return True
         except FileOperationError as exc:
-            log.error(exc)
+            log.error(u"{0}", exc)
             return False
+
+    def try_sync(self, write, move, with_album=True):
+        """Synchronize the item with the database and, possibly, updates its
+        tags on disk and its path (by moving the file).
+
+        `write` indicates whether to write new tags into the file. Similarly,
+        `move` controls whether the path should be updated. In the
+        latter case, files are *only* moved when they are inside their
+        library's directory (if any).
+
+        Similar to calling :meth:`write`, :meth:`move`, and :meth:`store`
+        (conditionally).
+        """
+        if write:
+            self.try_write()
+        if move:
+            # Check whether this file is inside the library directory.
+            if self._db and self._db.directory in util.ancestry(self.path):
+                log.debug(u'moving {0} to synchronize path',
+                          util.displayable_path(self.path))
+                self.move(with_album=with_album)
+        self.store()
 
     # Files themselves.
 
-    def move_file(self, dest, copy=False):
+    def move_file(self, dest, copy=False, link=False):
         """Moves or copies the item's file, updating the path value if
         the move succeeds. If a file exists at ``dest``, then it is
         slightly modified to be unique.
@@ -435,6 +663,10 @@ class Item(LibModel):
         if copy:
             util.copy(self.path, dest)
             plugins.send("item_copied", item=self, source=self.path,
+                         destination=dest)
+        elif link:
+            util.link(self.path, dest)
+            plugins.send("item_linked", item=self, source=self.path,
                          destination=dest)
         else:
             plugins.send("before_item_moved", item=self, source=self.path,
@@ -451,6 +683,17 @@ class Item(LibModel):
         integer.
         """
         return int(os.path.getmtime(syspath(self.path)))
+
+    def try_filesize(self):
+        """Get the size of the underlying file in bytes.
+
+        If the file is missing, return 0 (and log a warning).
+        """
+        try:
+            return os.path.getsize(syspath(self.path))
+        except (OSError, Exception) as exc:
+            log.warning(u'could not get filesize: {0}', exc)
+            return 0
 
     # Model methods.
 
@@ -477,13 +720,14 @@ class Item(LibModel):
 
         self._db._memotable = {}
 
-    def move(self, copy=False, basedir=None, with_album=True):
+    def move(self, copy=False, link=False, basedir=None, with_album=True):
         """Move the item to its designated location within the library
         directory (provided by destination()). Subdirectories are
         created as needed. If the operation succeeds, the item's path
         field is updated to reflect the new location.
 
-        If copy is True, moving the file is copied rather than moved.
+        If `copy` is true, moving the file is copied rather than moved.
+        Similarly, `link` creates a symlink instead.
 
         basedir overrides the library base directory for the
         destination.
@@ -505,7 +749,7 @@ class Item(LibModel):
 
         # Perform the move and store the change.
         old_path = self.path
-        self.move_file(dest, copy)
+        self.move_file(dest, copy, link)
         self.store()
 
         # If this item is in an album, move its art.
@@ -520,12 +764,6 @@ class Item(LibModel):
             util.prune_dirs(os.path.dirname(old_path), self._db.directory)
 
     # Templating.
-
-    def _formatted_mapping(self, for_path=False):
-        """Get a mapping containing string-formatted values from either
-        this item or the associated album, if any.
-        """
-        return FormattedItemMapping(self, for_path)
 
     def destination(self, fragment=False, basedir=None, platform=None,
                     path_formats=None):
@@ -546,7 +784,7 @@ class Item(LibModel):
         for query, path_format in path_formats:
             if query == PF_KEY_DEFAULT:
                 continue
-            query = get_query(query, type(self))
+            query, _ = parse_query_string(query, type(self))
             if query.match(self):
                 # The query matches the item! Use the corresponding path
                 # format.
@@ -557,7 +795,7 @@ class Item(LibModel):
                 if query == PF_KEY_DEFAULT:
                     break
             else:
-                assert False, "no default path format"
+                assert False, u"no default path format"
         if isinstance(path_format, Template):
             subpath_tmpl = path_format
         else:
@@ -571,80 +809,33 @@ class Item(LibModel):
             subpath = unicodedata.normalize('NFD', subpath)
         else:
             subpath = unicodedata.normalize('NFC', subpath)
-        # Truncate components and remove forbidden characters.
-        subpath = util.sanitize_path(subpath, self._db.replacements)
-        # Encode for the filesystem.
-        if not fragment:
-            subpath = bytestring_path(subpath)
 
-        # Preserve extension.
-        _, extension = os.path.splitext(self.path)
-        if fragment:
-            # Outputting Unicode.
-            extension = extension.decode('utf8', 'ignore')
-        subpath += extension.lower()
+        if beets.config['asciify_paths']:
+            subpath = unidecode(subpath)
 
-        # Truncate too-long components.
         maxlen = beets.config['max_filename_length'].get(int)
         if not maxlen:
             # When zero, try to determine from filesystem.
             maxlen = util.max_filename_length(self._db.directory)
-        subpath = util.truncate_path(subpath, maxlen)
+
+        subpath, fellback = util.legalize_path(
+            subpath, self._db.replacements, maxlen,
+            os.path.splitext(self.path)[1], fragment
+        )
+        if fellback:
+            # Print an error message if legalization fell back to
+            # default replacements because of the maximum length.
+            log.warning(
+                u'Fell back to default replacements when naming '
+                u'file {}. Configure replacements to avoid lengthening '
+                u'the filename.',
+                subpath
+            )
 
         if fragment:
             return subpath
         else:
             return normpath(os.path.join(basedir, subpath))
-
-
-class FormattedItemMapping(dbcore.db.FormattedMapping):
-    """A `dict`-like formatted view of an item that inherits album fields.
-
-    The accessor ``mapping[key]`` returns the formated version of either
-    ``item[key]`` or ``album[key]``. Here `album` is the album
-    associated to `item` if it exists.
-    """
-    def __init__(self, item, for_path=False):
-        super(FormattedItemMapping, self).__init__(item, for_path)
-        self.album = item.get_album()
-        self.album_keys = []
-        if self.album:
-            for key in self.album.keys(True):
-                if key in Album.item_keys or key not in item._fields.keys():
-                    self.album_keys.append(key)
-        self.all_keys = set(self.model_keys).union(self.album_keys)
-
-    def _get(self, key):
-        """Get the value for a key, either from the album or the item.
-        Raise a KeyError for invalid keys.
-        """
-        if key in self.album_keys:
-            return self.album._get_formatted(key, self.for_path)
-        elif key in self.model_keys:
-            return self.model._get_formatted(key, self.for_path)
-        else:
-            raise KeyError(key)
-
-    def __getitem__(self, key):
-        """Get the value for a key. Certain unset values are remapped.
-        """
-        value = self._get(key)
-
-        # `artist` and `albumartist` fields fall back to one another.
-        # This is helpful in path formats when the album artist is unset
-        # on as-is imports.
-        if key == 'artist' and not value:
-            return self._get('albumartist')
-        elif key == 'albumartist' and not value:
-            return self._get('artist')
-        else:
-            return value
-
-    def __iter__(self):
-        return iter(self.all_keys)
-
-    def __len__(self):
-        return len(self.all_keys)
 
 
 class Album(LibModel):
@@ -654,6 +845,7 @@ class Album(LibModel):
     """
     _table = 'albums'
     _flex_table = 'album_attributes'
+    _always_dirty = True
     _fields = {
         'id':      types.PRIMARY_ID,
         'artpath': PathType(),
@@ -667,7 +859,6 @@ class Album(LibModel):
         'year':               types.PaddedInt(4),
         'month':              types.PaddedInt(2),
         'day':                types.PaddedInt(2),
-        'tracktotal':         types.PaddedInt(2),
         'disctotal':          types.PaddedInt(2),
         'comp':               types.BOOLEAN,
         'mb_albumid':         types.STRING,
@@ -681,7 +872,6 @@ class Album(LibModel):
         'language':           types.STRING,
         'country':            types.STRING,
         'albumstatus':        types.STRING,
-        'media':              types.STRING,
         'albumdisambig':      types.STRING,
         'rg_album_gain':      types.NULL_FLOAT,
         'rg_album_peak':      types.NULL_FLOAT,
@@ -691,6 +881,16 @@ class Album(LibModel):
     }
 
     _search_fields = ('album', 'albumartist', 'genre')
+
+    _types = {
+        'path':        PathType(),
+        'data_source': types.STRING,
+    }
+
+    _sorts = {
+        'albumartist': SmartArtistSort,
+        'artist': SmartArtistSort,
+    }
 
     item_keys = [
         'added',
@@ -702,7 +902,6 @@ class Album(LibModel):
         'year',
         'month',
         'day',
-        'tracktotal',
         'disctotal',
         'comp',
         'mb_albumid',
@@ -716,7 +915,6 @@ class Album(LibModel):
         'language',
         'country',
         'albumstatus',
-        'media',
         'albumdisambig',
         'rg_album_gain',
         'rg_album_peak',
@@ -727,12 +925,15 @@ class Album(LibModel):
     """List of keys that are set on an album's items.
     """
 
+    _format_config_key = 'format_album'
+
     @classmethod
     def _getters(cls):
         # In addition to plugin-provided computed fields, also expose
         # the album's directory as `path`.
         getters = plugins.album_field_getters()
         getters['path'] = Album.item_dir
+        getters['albumtotal'] = Album._albumtotal
         return getters
 
     def items(self):
@@ -761,7 +962,7 @@ class Album(LibModel):
             for item in self.items():
                 item.remove(delete, False)
 
-    def move_art(self, copy=False):
+    def move_art(self, copy=False, link=False):
         """Move or copy any existing album art so that it remains in the
         same directory as the items.
         """
@@ -774,9 +975,13 @@ class Album(LibModel):
             return
 
         new_art = util.unique_path(new_art)
-        log.debug('moving album art %s to %s' % (old_art, new_art))
+        log.debug(u'moving album art {0} to {1}',
+                  util.displayable_path(old_art),
+                  util.displayable_path(new_art))
         if copy:
             util.copy(old_art, new_art)
+        elif link:
+            util.link(old_art, new_art)
         else:
             util.move(old_art, new_art)
         self.artpath = new_art
@@ -786,7 +991,7 @@ class Album(LibModel):
             util.prune_dirs(os.path.dirname(old_art),
                             self._db.directory)
 
-    def move(self, copy=False, basedir=None):
+    def move(self, copy=False, link=False, basedir=None):
         """Moves (or copies) all items to their destination. Any album
         art moves along with them. basedir overrides the library base
         directory for the destination. The album is stored to the
@@ -801,10 +1006,10 @@ class Album(LibModel):
         # Move items.
         items = list(self.items())
         for item in items:
-            item.move(copy, basedir=basedir, with_album=False)
+            item.move(copy, link, basedir=basedir, with_album=False)
 
         # Move art.
-        self.move_art(copy)
+        self.move_art(copy, link)
         self.store()
 
     def item_dir(self):
@@ -813,8 +1018,29 @@ class Album(LibModel):
         """
         item = self.items().get()
         if not item:
-            raise ValueError('empty album')
+            raise ValueError(u'empty album')
         return os.path.dirname(item.path)
+
+    def _albumtotal(self):
+        """Return the total number of tracks on all discs on the album
+        """
+        if self.disctotal == 1 or not beets.config['per_disc_numbering']:
+            return self.items()[0].tracktotal
+
+        counted = []
+        total = 0
+
+        for item in self.items():
+            if item.disc in counted:
+                continue
+
+            total += item.tracktotal
+            counted.append(item.disc)
+
+            if len(counted) == self.disctotal:
+                break
+
+        return total
 
     def art_destination(self, image, item_dir=None):
         """Returns a path to the destination for the album art image
@@ -830,6 +1056,8 @@ class Album(LibModel):
 
         filename_tmpl = Template(beets.config['art_filename'].get(unicode))
         subpath = self.evaluate_template(filename_tmpl, True)
+        if beets.config['asciify_paths']:
+            subpath = unidecode(subpath)
         subpath = util.sanitize_path(subpath,
                                      replacements=self._db.replacements)
         subpath = bytestring_path(subpath)
@@ -843,6 +1071,8 @@ class Album(LibModel):
         """Sets the album's cover art to the image at the given path.
         The image is copied (or moved) into place, replacing any
         existing art.
+
+        Sends an 'art_set' event with `self` as the sole argument.
         """
         path = bytestring_path(path)
         oldart = self.artpath
@@ -866,6 +1096,8 @@ class Album(LibModel):
             util.move(path, artdest)
         self.artpath = artdest
 
+        plugins.send('art_set', album=self)
+
     def store(self):
         """Update the database with the album information. The album's
         tracks are also updated.
@@ -884,65 +1116,68 @@ class Album(LibModel):
                         item[key] = value
                     item.store()
 
+    def try_sync(self, write, move):
+        """Synchronize the album and its items with the database.
+        Optionally, also write any new tags into the files and update
+        their paths.
 
-# Query construction helper.
+        `write` indicates whether to write tags to the item files, and
+        `move` controls whether files (both audio and album art) are
+        moved.
+        """
+        self.store()
+        for item in self.items():
+            item.try_sync(write, move)
 
-def get_query(val, model_cls):
-    """Take a value which may be None, a query string, a query string
-    list, or a Query object, and return a suitable Query object.
 
-    `model_cls` is the subclass of Model indicating which entity this
-    is a query for (i.e., Album or Item) and is used to determine which
-    fields are searched.
+# Query construction helpers.
+
+def parse_query_parts(parts, model_cls):
+    """Given a beets query string as a list of components, return the
+    `Query` and `Sort` they represent.
+
+    Like `dbcore.parse_sorted_query`, with beets query prefixes and
+    special path query detection.
     """
     # Get query types and their prefix characters.
     prefixes = {':': dbcore.query.RegexpQuery}
     prefixes.update(plugins.queries())
 
-    # Convert a single string into a list of space-separated
-    # criteria.
-    if isinstance(val, basestring):
-        # A bug in Python < 2.7.3 prevents correct shlex splitting of
-        # Unicode strings.
-        # http://bugs.python.org/issue6988
-        if isinstance(val, unicode):
-            val = val.encode('utf8')
-        val = [s.decode('utf8') for s in shlex.split(val)]
-
-    if val is None:
-        return dbcore.query.TrueQuery()
-
-    elif isinstance(val, list) or isinstance(val, tuple):
-        # Special-case path-like queries, which are non-field queries
-        # containing path separators (/).
-        if 'path' in model_cls._fields:
-            path_parts = []
-            non_path_parts = []
-            for s in val:
-                if s.find(os.sep, 0, s.find(':')) != -1:
-                    # Separator precedes colon.
-                    path_parts.append(s)
-                else:
-                    non_path_parts.append(s)
+    # Special-case path-like queries, which are non-field queries
+    # containing path separators (/).
+    path_parts = []
+    non_path_parts = []
+    for s in parts:
+        if PathQuery.is_path_query(s):
+            path_parts.append(s)
         else:
-            path_parts = ()
-            non_path_parts = val
+            non_path_parts.append(s)
 
-        # Parse remaining parts and construct an AndQuery.
-        query = dbcore.query_from_strings(
-            dbcore.AndQuery, model_cls, prefixes, non_path_parts
-        )
+    query, sort = dbcore.parse_sorted_query(
+        model_cls, non_path_parts, prefixes
+    )
 
-        # Add path queries to aggregate query.
-        if path_parts:
-            query.subqueries += [PathQuery('path', s) for s in path_parts]
-        return query
+    # Add path queries to aggregate query.
+    # Match field / flexattr depending on whether the model has the path field
+    fast_path_query = 'path' in model_cls._fields
+    query.subqueries += [PathQuery('path', s, fast_path_query)
+                         for s in path_parts]
 
-    elif isinstance(val, dbcore.Query):
-        return val
+    return query, sort
 
-    else:
-        raise ValueError('query must be None or have type Query or str')
+
+def parse_query_string(s, model_cls):
+    """Given a beets query string, return the `Query` and `Sort` they
+    represent.
+
+    The string is split into components using shell-like syntax.
+    """
+    assert isinstance(s, unicode), u"Query is not unicode: {0!r}".format(s)
+    try:
+        parts = util.shlex_split(s)
+    except ValueError as exc:
+        raise dbcore.InvalidQueryError(s, exc)
+    return parse_query_parts(parts, model_cls)
 
 
 # The Library: interface to the database.
@@ -1006,30 +1241,52 @@ class Library(dbcore.Database):
 
     # Querying.
 
-    def _fetch(self, model_cls, query, order_by=None):
-        """Parse a query and fetch.
+    def _fetch(self, model_cls, query, sort=None):
+        """Parse a query and fetch. If a order specification is present
+        in the query string the `sort` argument is ignored.
         """
+        # Parse the query, if necessary.
+        try:
+            parsed_sort = None
+            if isinstance(query, basestring):
+                query, parsed_sort = parse_query_string(query, model_cls)
+            elif isinstance(query, (list, tuple)):
+                query, parsed_sort = parse_query_parts(query, model_cls)
+        except dbcore.query.InvalidQueryArgumentTypeError as exc:
+            raise dbcore.InvalidQueryError(query, exc)
+
+        # Any non-null sort specified by the parsed query overrides the
+        # provided sort.
+        if parsed_sort and not isinstance(parsed_sort, dbcore.query.NullSort):
+            sort = parsed_sort
+
         return super(Library, self)._fetch(
-            model_cls, get_query(query, model_cls), order_by
+            model_cls, query, sort
         )
 
-    def albums(self, query=None):
-        """Get a sorted list of :class:`Album` objects matching the
-        given query.
+    @staticmethod
+    def get_default_album_sort():
+        """Get a :class:`Sort` object for albums from the config option.
         """
-        order = '{0}, album'.format(
-            _orelse("albumartist_sort", "albumartist")
-        )
-        return self._fetch(Album, query, order)
+        return dbcore.sort_from_strings(
+            Album, beets.config['sort_album'].as_str_seq())
 
-    def items(self, query=None):
-        """Get a sorted list of :class:`Item` objects matching the given
-        query.
+    @staticmethod
+    def get_default_item_sort():
+        """Get a :class:`Sort` object for items from the config option.
         """
-        order = '{0}, album, disc, track'.format(
-            _orelse("artist_sort", "artist")
-        )
-        return self._fetch(Item, query, order)
+        return dbcore.sort_from_strings(
+            Item, beets.config['sort_item'].as_str_seq())
+
+    def albums(self, query=None, sort=None):
+        """Get :class:`Album` objects matching the query.
+        """
+        return self._fetch(Album, query, sort or self.get_default_album_sort())
+
+    def items(self, query=None, sort=None):
+        """Get :class:`Item` objects matching the query.
+        """
+        return self._fetch(Item, query, sort or self.get_default_item_sort())
 
     # Convenience accessors.
 
@@ -1068,10 +1325,10 @@ class DefaultTemplateFunctions(object):
     additional context to the functions -- specifically, the Item being
     evaluated.
     """
-    _prefix = 'tmpl_'
+    _prefix = b'tmpl_'
 
     def __init__(self, item=None, lib=None):
-        """Paramaterize the functions. If `item` or `lib` is None, then
+        """Parametrize the functions. If `item` or `lib` is None, then
         some functions (namely, ``aunique``) will always evaluate to the
         empty string.
         """
@@ -1138,11 +1395,11 @@ class DefaultTemplateFunctions(object):
         return unidecode(s)
 
     @staticmethod
-    def tmpl_time(s, format):
+    def tmpl_time(s, fmt):
         """Format a time value using `strftime`.
         """
         cur_fmt = beets.config['time_format'].get(unicode)
-        return time.strftime(format, time.strptime(s, cur_fmt))
+        return time.strftime(fmt, time.strptime(s, cur_fmt))
 
     def tmpl_aunique(self, keys=None, disam=None):
         """Generate a string that is guaranteed to be unique among all
@@ -1176,7 +1433,7 @@ class DefaultTemplateFunctions(object):
         # Find matching albums to disambiguate with.
         subqueries = []
         for key in keys:
-            value = getattr(album, key)
+            value = album.get(key, '')
             subqueries.append(dbcore.MatchQuery(key, value))
         albums = self.lib.albums(dbcore.AndQuery(subqueries))
 
@@ -1189,7 +1446,7 @@ class DefaultTemplateFunctions(object):
         # Find the first disambiguator that distinguishes the albums.
         for disambiguator in disam:
             # Get the value for each album for the current field.
-            disam_values = set([getattr(a, disambiguator) for a in albums])
+            disam_values = set([a.get(disambiguator, '') for a in albums])
 
             # If the set of unique values is equal to the number of
             # albums in the disambiguation set, we're done -- this is
@@ -1204,7 +1461,7 @@ class DefaultTemplateFunctions(object):
             return res
 
         # Flatten disambiguation value into a string.
-        disam_value = album._get_formatted(disambiguator, True)
+        disam_value = album.formatted(True).get(disambiguator)
         res = u' [{0}]'.format(disam_value)
         self.lib._memotable[memokey] = res
         return res
